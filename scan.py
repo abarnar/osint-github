@@ -1,0 +1,237 @@
+import requests
+import os
+from bs4 import BeautifulSoup
+try:
+    import queue
+except ImportError:
+    import Queue as queue
+import time
+import schedule
+import json
+from datetime import datetime
+
+# datetime object containing current date and time
+
+
+#Environment variables declaration
+username = os.environ.get('GITHUB_USERNAME')
+token = os.environ.get('GITHUB_TOKEN')
+repository = os.environ.get('GITHUB_ORG_NAME')
+wekbook_url = os.environ.get('SLACK_WEBHOOK_URL')
+#Get list of Members in an organisation
+def getMembersAPIURL():
+    return 'https://api.github.com/orgs/' + repository + '/members'
+
+#Get list of public repositories of all organisation users
+def getRepoAPIUrlForUser(user):
+    return 'https://api.github.com/users/' + user + '/repos'
+
+#Get list of latest commits of all public repos
+def getCommitsAPIForRepo(user , repo):
+    return 'https://api.github.com/repos/' + user + '/' + repo + '/commits'
+
+
+def getGithubUsernameListFromResponse(responsejson):
+    usernamelist = []
+    for i in responsejson:
+        usernamelist.append(i['login'])
+    return usernamelist
+
+
+def getCompleteUserNameList():
+    response = requests.get(getMembersAPIURL(), auth=(username, token))
+    completeUserNameList = getGithubUsernameListFromResponse(response.json())
+    while 'next' in response.links:
+        response = requests.get(response.links['next']['url'], auth=(username, token))
+        completeUserNameList.extend(getGithubUsernameListFromResponse(response.json()))
+    return completeUserNameList
+
+
+def getInfoListForUsers(usernamelist):
+    infoList = []
+    for user in usernamelist:
+        githubResponseForRepos = requests.get(getRepoAPIUrlForUser(user), auth=(username, token))
+        publicReposList = githubResponseForRepos.json()
+        # getting only the user repositories which are not forked
+        for repoJSON in publicReposList:
+            if ('fork' in repoJSON) and (not repoJSON["fork"]):
+                # get all latest commits of an user
+                gitHubResponseForCommits = requests.get(getCommitsAPIForRepo(user, repoJSON['name']),auth=(username, token))
+                commitsJSON = gitHubResponseForCommits.json()
+                if not ('message' in commitsJSON):
+                    latestCommit = commitsJSON[0]['sha']
+                    repoMap = constructGithubInfoMapForUser(latestCommit, repoJSON, user)
+                    # print(repoMap)
+                    infoList.append(repoMap)
+    return infoList
+
+
+def constructGithubInfoMapForUser(commitsHistoryList, repoJSON, user):
+    repoMap = {}
+    repoMap['repo_name'] = repoJSON['name']
+    repoMap['git_url'] = repoJSON['git_url']
+    repoMap['github_user'] = user
+    repoMap['commit_id'] = commitsHistoryList
+    return repoMap
+
+def getRegex():
+    secretCommandAdd = "grep -rnE --exclude-dir='.*'  \"(AIza[0-9A-Za-z\\-_]{35})\" "
+    return secretCommandAdd
+
+def doscheduledjob():
+    print("starting doscheduledjob()")
+    now = datetime.now()
+    print(" inside doscheduledjob() ", now)
+    if not flag:
+        print('flag is false')
+        return
+    print(" starting job ")
+    for repoInfo in infoList:
+        gitHubResponseForCommits = requests.get(
+            'https://api.github.com/repos/' + repoInfo['github_user'] + '/' + repoInfo['repo_name'] + '/commits', auth=(username, token))
+        commitsJSON = gitHubResponseForCommits.json()
+
+        if not ('message' in commitsJSON):
+            commitsToBeScanned = []
+            for i in commitsJSON:
+                if repoInfo['commit_id'] == i['sha']:
+                    break
+                else:
+                    commitsToBeScanned.append(i['sha'])
+            if len(commitsToBeScanned) == 0 :
+                print("it is the same for " + repoInfo['repo_name'])
+            else:
+                for newCommit in commitsToBeScanned:
+                    doScan(newCommit, repoInfo, cloningpath)
+                    repoInfo['commit_id'] = newCommit
+        else:
+            print("empty repo...",repoInfo['repo_name'])
+
+
+def doScan(commitID, repoInfo, cloningpath):
+    print('different')
+    print(' new commit is ' + commitID)
+    commitAPIURL = 'https://api.github.com/repos/' + repoInfo['github_user'] + '/' + repoInfo[
+        'repo_name'] + '/compare/' + repoInfo['commit_id'] + '...' + commitID
+    commitsAPIResponseJSON = requests.get(commitAPIURL, auth=(username, token)).json()
+    # print(commitsAPIResponseJSON)
+    if 'files' in commitsAPIResponseJSON:
+        changedFiles = commitsAPIResponseJSON['files']
+        changedFilesList = []
+        for file in changedFiles:
+            if 'raw_url' in file:
+                newFileURL = file['raw_url']
+                changedFilesList.append(file['blob_url'])
+                fileName = file['filename']
+                if not os.path.exists(cloningpath):
+                    os.mkdir(cloningpath)
+                if not os.path.exists(cloningpath + "/" + commitID):
+                    os.mkdir(cloningpath + "/" + commitID)
+                fileName = cloningpath + "/" + commitID + "/" + fileName
+
+                r = requests.get(newFileURL)
+                soup = BeautifulSoup(r.content, 'html5lib')
+
+                with open(fileName, "w") as file1:
+                    file1.write(soup.get_text())
+
+        time.sleep(10)
+        command = getRegex() + cloningpath + "/" + commitID
+        resultMap = repoInfo
+
+        result = os.popen(command).read()
+        if result:
+            resultMap['result'] = result
+            resultMap['commit_id'] = commitID
+            resultMap['url'] = changedFilesList
+            sendSlackNotifications(resultMap, cloningpath + "/" + commitID+"/")
+
+
+def sendSlackNotifications(resultMap, searchPath):
+    data = constructSlackMsg(resultMap, searchPath)
+    response = requests.post(wekbook_url, data=json.dumps(
+        data), headers={'Content-Type': 'application/json'})
+    print('Response: ' + str(response.text))
+    print('Response code: ' + str(response.status_code))
+
+
+def constructSlackMsg(resultMap, searchPath):
+    print(resultMap)
+    urls = ""
+    for i in resultMap['url']:
+        urls = urls+i+"\n"
+    resultTrace = str(resultMap['result'])
+    resultTrace = resultTrace.replace(searchPath,"" )
+    print(resultTrace)
+    data = {
+        "blocks": [{
+            "type": "divider"
+        },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Sensitive information found in File(s):* "+urls
+                }
+            },
+            {
+                "type": "section",
+                "fields": [{
+                    "type": "mrkdwn",
+                    "text": "*github_user:*\n"+resultMap['github_user']
+                },
+                    {
+                        "type": "mrkdwn",
+                        "text": "*repo_name:*\n"+resultMap['repo_name']
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": "*commit_id:*\n"+resultMap['commit_id']
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": "*result(s):*\n"+resultTrace
+                    }
+                ]
+            },
+            {
+                "type": "divider"
+            }
+        ]
+    }
+    return data
+
+
+def doJobToGetUserInfoList():
+    print("starting doJobToGetUserInfoList()")
+    now = datetime.now()
+    print(" inside doJobToGetUserInfoList() ", now)
+    global infoList
+    global flag
+    flag = False
+    print('starting to get github usernames...')
+    usernamelist = getCompleteUserNameList()
+    print('total users... ', len(usernamelist))
+    print('starting to get repo information of users...')
+    infoList = getInfoListForUsers(usernamelist[:5])
+    flag = True
+
+
+
+infoList= []
+flag = False
+if (__name__ == "__main__"):
+
+    print('starting incremental scan...')
+    now = datetime.now()
+    print(" inside main ", now)
+    doJobToGetUserInfoList()
+    schedule.every(120).seconds.do(doJobToGetUserInfoList)
+    schedule.every(5).seconds.do(doscheduledjob)
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+
+
+
+
