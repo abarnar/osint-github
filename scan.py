@@ -18,6 +18,9 @@ username = os.environ.get('GITHUB_USERNAME')
 token = os.environ.get('GITHUB_TOKEN')
 repository = os.environ.get('GITHUB_ORG_NAME')
 wekbook_url = os.environ.get('SLACK_WEBHOOK_URL')
+cloningpath = "cloning_path"
+signature_file = "mount/signature.json"
+
 #Get list of Members in an organisation
 def getMembersAPIURL():
     return 'https://api.github.com/orgs/' + repository + '/members'
