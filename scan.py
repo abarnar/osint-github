@@ -202,8 +202,8 @@ def doJobToGetUserInfoList():
     global infoList
     global flag
     flag = False
-    # usernamelist = getCompleteUserNameList()
-    usernamelist = username
+    usernamelist = getCompleteUserNameList()
+    # usernamelist = [username]
     print('total users... ', len(usernamelist))
     print('starting to get repo information of users...')
     infoList = getInfoListForUsers(usernamelist)
