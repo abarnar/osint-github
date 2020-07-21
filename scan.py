@@ -75,6 +75,7 @@ def constructGithubInfoMapForUser(commitsHistoryList, repoJSON, user):
     repoMap['git_url'] = repoJSON['git_url']
     repoMap['github_user'] = user
     repoMap['commit_id'] = commitsHistoryList
+    #
     return repoMap
 
 def getRegex():
